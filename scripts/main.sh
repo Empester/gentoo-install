@@ -132,6 +132,227 @@ function install_authorized_keys() {
 	fi
 }
 
+function create_user_account() {
+	# Only create user if CREATE_USER is enabled and USERNAME is defined
+	if [[ "${CREATE_USER:-}" != "yes" ]]; then
+		einfo "User creation disabled, skipping user creation"
+		return 0
+	fi
+	
+	if [[ -z "${USERNAME:-}" ]]; then
+		ewarn "No USERNAME defined, skipping user creation"
+		return 0
+	fi
+
+	einfo "Creating user account: $USERNAME"
+
+	# Determine shell path
+	local shell_path="/bin/bash"
+	if [[ -n "${SHELL_CHOICE:-}" ]]; then
+		case "$SHELL_CHOICE" in
+			"bash") shell_path="/bin/bash" ;;
+			"zsh") shell_path="/bin/zsh" ;;
+			"fish") shell_path="/usr/bin/fish" ;;
+			"sh") shell_path="/bin/sh" ;;
+			*) shell_path="/bin/bash" ;;
+		esac
+	fi
+
+	# Create user with home directory
+	try useradd -m -s "$shell_path" "$USERNAME" \
+		|| die "Could not create user $USERNAME"
+
+	# Set full name in GECOS field if provided
+	if [[ -n "${FULLNAME:-}" ]]; then
+		try usermod -c "$FULLNAME" "$USERNAME" \
+			|| die "Could not set full name for $USERNAME"
+	fi
+
+	# Add user to groups
+	local groups="users"
+	if [[ -n "${ADDITIONAL_GROUPS:-}" ]]; then
+		# Split comma-separated groups and add them
+		IFS=',' read -ra GROUP_ARRAY <<< "$ADDITIONAL_GROUPS"
+		for group in "${GROUP_ARRAY[@]}"; do
+			group=$(echo "$group" | xargs)  # trim whitespace
+			if [[ -n "$group" ]]; then
+				# Ensure group exists before adding user to it
+				if ! getent group "$group" >/dev/null 2>&1; then
+					einfo "Creating group: $group"
+					try groupadd "$group" \
+						|| ewarn "Could not create group $group, skipping"
+				fi
+				groups="$groups,$group"
+			fi
+		done
+	fi
+
+	# Add wheel group for sudo access if not already included
+	if [[ "$groups" != *"wheel"* ]]; then
+		groups="$groups,wheel"
+	fi
+
+	# Ensure essential groups exist
+	for essential_group in users wheel; do
+		if ! getent group "$essential_group" >/dev/null 2>&1; then
+			einfo "Creating essential group: $essential_group"
+			try groupadd "$essential_group" \
+				|| die "Could not create essential group $essential_group"
+		fi
+	done
+
+	try usermod -G "$groups" "$USERNAME" \
+		|| die "Could not add $USERNAME to groups: $groups"
+
+	# Set user password if provided
+	if [[ -n "${USERPASS:-}" ]]; then
+		printf "%s\n%s\n" "$USERPASS" "$USERPASS" | try passwd "$USERNAME" \
+			|| die "Could not set password for $USERNAME"
+		einfo "Password set for user $USERNAME"
+	else
+		try passwd -d "$USERNAME" \
+			|| die "Could not clear password for $USERNAME"
+		ewarn "No password set for $USERNAME, set one as soon as possible!"
+	fi
+
+	# Install sudo if wheel group is used
+	if [[ "$groups" == *"wheel"* ]]; then
+		einfo "Installing sudo for wheel group access"
+		try emerge --verbose app-admin/sudo
+
+		# Configure sudo for wheel group
+		if [[ $SYSTEMD == "true" ]]; then
+			# systemd doesn't need special sudo configuration for wheel group
+			einfo "sudo is configured for wheel group (systemd)"
+		else
+			# For OpenRC, ensure wheel group has sudo access
+			if ! grep -q "^%wheel" /etc/sudoers 2>/dev/null; then
+				echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers \
+					|| die "Could not configure sudo for wheel group"
+			fi
+			einfo "sudo configured for wheel group (OpenRC)"
+		fi
+	fi
+
+	# Install additional shells if needed
+	if [[ "$shell_path" == "/bin/zsh" ]]; then
+		einfo "Installing zsh"
+		try emerge --verbose app-shells/zsh
+	elif [[ "$shell_path" == "/usr/bin/fish" ]]; then
+		einfo "Installing fish"
+		try emerge --verbose app-shells/fish
+	fi
+
+	# Create .bashrc for bash users
+	if [[ "$shell_path" == "/bin/bash" ]]; then
+		cat > "/home/$USERNAME/.bashrc" <<'EOF'
+# ~/.bashrc: executed by bash(1) for non-login shells.
+
+# If not running interactively, don't do anything
+[[ $- != *i* ]] && return
+
+# don't put duplicate lines or lines starting with space in the history.
+HISTCONTROL=ignoreboth
+
+# append to the history file, don't overwrite it
+shopt -s histappend
+
+# for setting history length see HISTSIZE and HISTFILESIZE in bash(1)
+HISTSIZE=1000
+HISTFILESIZE=2000
+
+# check the window size after each command and, if necessary,
+# update the values of LINES and COLUMNS.
+shopt -s checkwinsize
+
+# make less more friendly for non-text input files, see lesspipe(1)
+[[ -x /usr/bin/lesspipe ]] && eval "$(SHELL=/bin/sh lesspipe)"
+
+# set a fancy prompt (non-color, unless we know we "want" color)
+case "$TERM" in
+    xterm-color|*-256color) color_prompt=yes;;
+esac
+
+# uncomment for a colored prompt, if the terminal has the capability; turned
+# off by default to not distract the user: the focus in a terminal window
+# should be on the output of commands, not on the prompt
+#force_color_prompt=yes
+
+if [[ -n "$color_prompt" ]]; then
+    if [[ $EUID -eq 0 ]]; then
+        PS1='\[\033[01;31m\]\h\[\033[01;34m\] \W \$\[\033[00m\] '
+    else
+        PS1='\[\033[01;32m\]\u@\h\[\033[01;34m\] \w \$\[\033[00m\] '
+    fi
+else
+    if [[ $EUID -eq 0 ]]; then
+        PS1='\h \W \$ '
+    else
+        PS1='\u@\h \w \$ '
+    fi
+fi
+
+# enable color support of ls and also add handy aliases
+if [[ -x /usr/bin/dircolors ]]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# some more ls aliases
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+# Add an "alert" alias for long running commands.  Use like so:
+#   sleep 10; alert
+alias alert='notify-send --urgency=low -i "$([[ $? = 0 ]] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
+
+# Alias definitions.
+if [[ -f ~/.bash_aliases ]]; then
+    . ~/.bash_aliases
+fi
+
+# enable programmable completion features (you don't need to enable
+# this, if it's already enabled in /etc/bash.bashrc and /etc/profile
+# sources /etc/bash.bashrc).
+if ! shopt -oq posix; then
+  if [[ -f /usr/share/bash-completion/bash_completion ]]; then
+    . /usr/share/bash-completion/bash_completion
+  elif [[ -f /etc/bash_completion ]]; then
+    . /etc/bash_completion
+  fi
+fi
+EOF
+		chown "$USERNAME:$USERNAME" "/home/$USERNAME/.bashrc" \
+			|| die "Could not set ownership of .bashrc for $USERNAME"
+	fi
+
+	# Set proper ownership for home directory
+	try chown -R "$USERNAME:$USERNAME" "/home/$USERNAME" \
+		|| die "Could not set ownership of home directory for $USERNAME"
+
+	# Create additional useful directories in home
+	local home_dirs=("Desktop" "Documents" "Downloads" "Music" "Pictures" "Videos" "Public" "Templates")
+	for dir in "${home_dirs[@]}"; do
+		if [[ ! -d "/home/$USERNAME/$dir" ]]; then
+			try mkdir -p "/home/$USERNAME/$dir" \
+				|| ewarn "Could not create /home/$USERNAME/$dir"
+		fi
+	done
+
+	# Set proper permissions for home directory
+	try chmod 755 "/home/$USERNAME" \
+		|| die "Could not set permissions for home directory"
+
+	einfo "User account $USERNAME created successfully"
+	einfo "Groups: $groups"
+	einfo "Shell: $shell_path"
+	einfo "Home directory: /home/$USERNAME"
+}
+
 function generate_initramfs() {
 	local output="$1"
 
@@ -538,13 +759,25 @@ EOF
 		try emerge --verbose --autounmask-continue=y -- "${ADDITIONAL_PACKAGES[@]}"
 	fi
 
-	if ask "Do you want to assign a root password now?"; then
-		try passwd root
-		einfo "Root password assigned"
+	# Set root password if provided in config
+	if [[ -n "${ROOTPASS:-}" ]]; then
+		printf "%s\n%s\n" "$ROOTPASS" "$ROOTPASS" | try passwd root \
+			|| die "Could not set root password"
+		einfo "Root password set from configuration"
 	else
-		try passwd -d root
-		ewarn "Root password cleared, set one as soon as possible!"
+		if ask "Do you want to assign a root password now?"; then
+			try passwd root
+			einfo "Root password assigned"
+		else
+			try passwd -d root
+			ewarn "Root password cleared, set one as soon as possible!"
+		fi
 	fi
+
+	# Create user account if configured
+	maybe_exec 'before_create_user_account'
+	create_user_account
+	maybe_exec 'after_create_user_account'
 
 	# If configured, change to gentoo testing at the last moment.
 	# This is to ensure a smooth installation process. You can deal

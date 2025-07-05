@@ -12,6 +12,8 @@ TEMP_CONFIG="/tmp/gentoo-tui.conf"
 DEFAULT_HOSTNAME="gentoo"
 DEFAULT_TIMEZONE="Europe/London"
 DEFAULT_USERNAME="gentoo"
+DEFAULT_FULLNAME="Gentoo User"
+DEFAULT_SHELL="/bin/bash"
 # --- END CONFIGURABLES ---
 
 # --- Helper: Check for dialog/whiptail ---
@@ -40,6 +42,30 @@ passwordbox() { $DIALOG --title "$1" --passwordbox "$2" 10 70 3>&1 1>&2 2>&3; }
 yesno() { $DIALOG --title "$1" --yesno "$2" 12 70; }
 menu() { $DIALOG --title "$1" --menu "$2" 20 70 10 "$@" 3>&1 1>&2 2>&3; }
 helpbox() { $DIALOG --title "Help" --msgbox "$1" 20 70; }
+
+# --- Helper: Validate username ---
+validate_username() {
+    local username="$1"
+    if [[ -z "$username" ]]; then
+        return 1
+    fi
+    if [[ ! "$username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        return 1
+    fi
+    if [[ "$username" == "root" || "$username" == "bin" || "$username" == "daemon" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# --- Helper: Validate password strength ---
+validate_password() {
+    local password="$1"
+    if [[ ${#password} -lt 8 ]]; then
+        return 1
+    fi
+    return 0
+}
 
 # --- Step 1: Welcome ---
 msgbox "Gentoo TUI Installer" "Welcome to the Gentoo Linux TUI Installer!\n\nThis wizard will guide you through a safe, step-by-step installation.\n\nYou will be asked about partitions, user accounts, and system settings.\n\nPress OK to begin."
@@ -80,13 +106,118 @@ else
 fi
 
 # --- Step 3: Account Creation ---
-msgbox "User Account" "You will now create a user account for daily use.\n\nThis is recommended for security."
-USERNAME=$(inputbox "Username" "Enter a username for your main user:" "$DEFAULT_USERNAME")
-if [[ -z "$USERNAME" ]]; then msgbox "Error" "No username entered."; exit 1; fi
-USERPASS=$(passwordbox "User Password" "Enter password for $USERNAME:")
-if [[ -z "$USERPASS" ]]; then msgbox "Error" "No user password entered."; exit 1; fi
-ROOTPASS=$(passwordbox "Root Password" "Enter password for root:")
-if [[ -z "$ROOTPASS" ]]; then msgbox "Error" "No root password entered."; exit 1; fi
+if yesno "User Account" "Do you want to create a user account for daily use?\n\nThis is recommended for security.\n\nYou can skip this and create users manually later."; then
+    CREATE_USER="yes"
+else
+    CREATE_USER="no"
+    USERNAME=""
+    USERPASS=""
+    FULLNAME=""
+    SHELL_CHOICE="bash"
+    ADDITIONAL_GROUPS="wheel"
+fi
+
+if [[ "$CREATE_USER" == "yes" ]]; then
+
+# Username input with validation
+while true; do
+    USERNAME=$(inputbox "Username" "Enter a username for your main user (lowercase letters, numbers, underscore, hyphen):" "$DEFAULT_USERNAME")
+    if [[ -z "$USERNAME" ]]; then 
+        msgbox "Error" "No username entered."; exit 1
+    fi
+    if validate_username "$USERNAME"; then
+        break
+    else
+        msgbox "Error" "Invalid username. Username must:\n- Start with a letter or underscore\n- Contain only lowercase letters, numbers, underscore, hyphen\n- Not be 'root', 'bin', or 'daemon'"
+    fi
+done
+
+# Full name input
+FULLNAME=$(inputbox "Full Name" "Enter the full name for $USERNAME:" "$DEFAULT_FULLNAME")
+if [[ -z "$FULLNAME" ]]; then FULLNAME="$USERNAME"; fi
+
+# Shell selection
+SHELL_CHOICE=$(menu "Shell" "Choose default shell for $USERNAME:" "bash" "Bash (recommended)" "zsh" "Zsh (advanced)" "fish" "Fish (user-friendly)" "sh" "Sh (minimal)")
+if [[ -z "$SHELL_CHOICE" ]]; then SHELL_CHOICE="bash"; fi
+
+# Additional groups
+GROUP_OPTIONS=(
+    "wheel" "Sudo access (recommended)"
+    "video" "Graphics drivers"
+    "audio" "Sound devices"
+    "netdev" "Network configuration"
+    "usb" "USB devices"
+    "cdrom" "CD/DVD drives"
+    "floppy" "Floppy drives"
+    "games" "Games"
+    "input" "Input devices"
+    "kvm" "Virtual machines"
+    "render" "Hardware acceleration"
+    "systemd-journal" "System logs (systemd only)"
+)
+
+selected_groups=()
+for ((i=0; i<${#GROUP_OPTIONS[@]}; i+=2)); do
+    group_name="${GROUP_OPTIONS[i]}"
+    group_desc="${GROUP_OPTIONS[i+1]}"
+    if yesno "Group: $group_name" "Add $USERNAME to group '$group_name'?\n\n$group_desc"; then
+        selected_groups+=("$group_name")
+    fi
+done
+
+# Always include wheel for sudo access
+if [[ ! " ${selected_groups[@]} " =~ " wheel " ]]; then
+    selected_groups+=("wheel")
+fi
+
+ADDITIONAL_GROUPS=$(IFS=','; echo "${selected_groups[*]}")
+
+# Password input with validation
+while true; do
+    USERPASS=$(passwordbox "User Password" "Enter password for $USERNAME (minimum 8 characters):")
+    if [[ -z "$USERPASS" ]]; then 
+        msgbox "Error" "No user password entered."; exit 1
+    fi
+    if validate_password "$USERPASS"; then
+        break
+    else
+        msgbox "Error" "Password too weak. Password must be at least 8 characters long."
+    fi
+done
+
+# Confirm password
+while true; do
+    USERPASS_CONFIRM=$(passwordbox "Confirm Password" "Confirm password for $USERNAME:")
+    if [[ "$USERPASS" == "$USERPASS_CONFIRM" ]]; then
+        break
+    else
+        msgbox "Error" "Passwords do not match. Please try again."
+    fi
+done
+
+# Root password
+while true; do
+    ROOTPASS=$(passwordbox "Root Password" "Enter password for root (minimum 8 characters):")
+    if [[ -z "$ROOTPASS" ]]; then 
+        msgbox "Error" "No root password entered."; exit 1
+    fi
+    if validate_password "$ROOTPASS"; then
+        break
+    else
+        msgbox "Error" "Password too weak. Password must be at least 8 characters long."
+    fi
+done
+
+# Confirm root password
+while true; do
+    ROOTPASS_CONFIRM=$(passwordbox "Confirm Root Password" "Confirm password for root:")
+    if [[ "$ROOTPASS" == "$ROOTPASS_CONFIRM" ]]; then
+        break
+    else
+        msgbox "Error" "Passwords do not match. Please try again."
+    fi
+done
+fi
 
 # --- Step 4: Hostname and Timezone ---
 HOSTNAME=$(inputbox "Hostname" "Enter hostname for your system:" "$DEFAULT_HOSTNAME")
@@ -103,7 +234,13 @@ KERNEL_TYPE=$(menu "Kernel" "Choose kernel type:" "prebuilt" "Prebuilt (recommen
 if [[ -z "$KERNEL_TYPE" ]]; then msgbox "Error" "No kernel type selected."; exit 1; fi
 
 # --- Step 7: Show Summary ---
-summary="You are about to install Gentoo with the following settings:\n\nRoot: $ROOT_PARTITION\nBoot: $BOOT_PARTITION\nSwap: $SWAP_PARTITION\nUser: $USERNAME\nHostname: $HOSTNAME\nTimezone: $TIMEZONE\nInit: $INITSYS\nKernel: $KERNEL_TYPE\n\nALL DATA ON SELECTED PARTITIONS WILL BE ERASED!\n\nContinue?"
+if [[ "$CREATE_USER" == "yes" ]]; then
+    user_summary="User Account:\n- Username: $USERNAME\n- Full Name: $FULLNAME\n- Shell: $SHELL_CHOICE\n- Groups: $ADDITIONAL_GROUPS"
+else
+    user_summary="User Account: None (will create manually later)"
+fi
+
+summary="You are about to install Gentoo with the following settings:\n\nRoot: $ROOT_PARTITION\nBoot: $BOOT_PARTITION\nSwap: $SWAP_PARTITION\n\n$user_summary\n\nSystem:\n- Hostname: $HOSTNAME\n- Timezone: $TIMEZONE\n- Init: $INITSYS\n- Kernel: $KERNEL_TYPE\n\nALL DATA ON SELECTED PARTITIONS WILL BE ERASED!\n\nContinue?"
 if ! yesno "Summary" "$summary"; then msgbox "Aborted" "Installation aborted by user."; exit 0; fi
 
 # --- Step 8: Write Config ---
@@ -124,6 +261,10 @@ TIMEZONE="$TIMEZONE"
 USERNAME="$USERNAME"
 USERPASS="$USERPASS"
 ROOTPASS="$ROOTPASS"
+FULLNAME="$FULLNAME"
+SHELL_CHOICE="$SHELL_CHOICE"
+ADDITIONAL_GROUPS="$ADDITIONAL_GROUPS"
+CREATE_USER="$CREATE_USER"
 KERNEL_TYPE="$KERNEL_TYPE"
 I_HAVE_READ_AND_EDITED_THE_CONFIG_PROPERLY="true"
 EOF
