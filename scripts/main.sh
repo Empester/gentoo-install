@@ -85,6 +85,11 @@ function configure_base_system() {
 }
 
 function configure_portage() {
+	# Workaround for circular dependency: sys-devel/m4 -nls
+	einfo "Applying workaround for sys-devel/m4 circular dependency (disabling nls USE flag)"
+	mkdir -p /etc/portage/package.use
+	echo "sys-devel/m4 -nls" >> /etc/portage/package.use/99gentoo-install
+
 	# Prepare /etc/portage for autounmask
 	mkdir_or_die 0755 "/etc/portage/package.use"
 	touch_or_die 0644 "/etc/portage/package.use/zz-autounmask"
